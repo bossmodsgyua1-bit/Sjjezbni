@@ -31,13 +31,25 @@ from telethon.errors import (
 )
 
 # ===== FIREBASE IMPORTS =====
+import firebase_admin
+from firebase_admin import credentials, db
+
+# ===== FIREBASE INITIALIZATION =====
+FIREBASE_ACTIVE = False
 try:
-    import firebase_admin
-    from firebase_admin import credentials, db
-    FIREBASE_AVAILABLE = True
-except:
-    FIREBASE_AVAILABLE = False
-    print("⚠️ firebase-admin not installed. Using local storage only.")
+    # Check if firebase config file exists
+    if os.path.exists("firebase-config.json"):
+        cred = credentials.Certificate("firebase-config.json")
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': 'https://bossmodpro-default-rtdb.firebaseio.com/'
+        })
+        print("✅ Firebase Connected Successfully!")
+        FIREBASE_ACTIVE = True
+    else:
+        print("⚠️ firebase-config.json not found. Using local storage only.")
+except Exception as e:
+    print(f"⚠️ Firebase Connection Error: {e}")
+    print("⚠️ Using local file storage only!")
 
 # ===== CONFIGURATION =====
 API_ID = 36750842
@@ -57,96 +69,21 @@ START_TIME = datetime.now()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TITAN")
 
-# ===== FIREBASE INITIALIZATION =====
-FIREBASE_ACTIVE = False
-if FIREBASE_AVAILABLE:
-    try:
-        if not firebase_admin._apps:
-            cred = credentials.Certificate("firebase-config.json")
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': 'https://bossmodpro-default-rtdb.firebaseio.com/'
-            })
-        FIREBASE_ACTIVE = True
-        print("✅ Firebase Connected Successfully!")
-    except Exception as e:
-        print(f"❌ Firebase Connection Error: {e}")
-        print("⚠️ Using local file storage only!")
-
-# ===== MASTER DATABASE FUNCTIONS - MERGE LOGIC =====
-def save_data(file, data):
-    """Save data to Firebase with merge logic (no duplicates)"""
-    if file == DB_FILE and FIREBASE_ACTIVE:
-        try:
-            ref = db.reference('/sessions')
-            old_data = ref.get()
-            if old_data:
-                # Merge old and new data (no duplicates)
-                merged = {i['phone']: i for i in old_data}
-                for i in data:
-                    merged[i['phone']] = i
-                final = list(merged.values())
-            else:
-                final = data
-            ref.set(final)
-            print(f"✅ Saved {len(final)} sessions to Firebase (merged)")
-            
-            # Also save locally as backup
-            try:
-                with open(file, 'w') as f:
-                    json.dump(final, f, indent=4)
-            except:
-                pass
-            return True
-        except Exception as e:
-            print(f"❌ Firebase Save Error: {e}")
-            # Fallback to local file
-            try:
-                with open(file, 'w') as f:
-                    json.dump(data, f, indent=4)
-                return True
-            except:
-                return False
-    else:
-        try:
-            with open(file, 'w') as f:
-                json.dump(data, f, indent=4)
-            return True
-        except:
-            return False
-
+# ===== FIREBASE DATABASE FUNCTIONS =====
 def load_data(file):
-    """Load data from Firebase, fallback to local"""
     if file == DB_FILE and FIREBASE_ACTIVE:
+        # Firebase से sessions load करो
         try:
             ref = db.reference('/sessions')
             data = ref.get()
             if data:
                 print(f"✅ Loaded {len(data)} sessions from Firebase")
-                # Also save locally as backup
-                try:
-                    with open(file, 'w') as f:
-                        json.dump(data, f, indent=4)
-                except:
-                    pass
                 return data
             else:
-                print("📭 No sessions found in Firebase, checking local...")
-                # Fallback to local file
-                if os.path.exists(file):
-                    try:
-                        with open(file, 'r') as f:
-                            local_data = json.load(f)
-                            print(f"✅ Loaded {len(local_data)} sessions from local backup")
-                            # Restore to Firebase
-                            if local_data:
-                                ref.set(local_data)
-                                print("✅ Restored local data to Firebase")
-                            return local_data
-                    except:
-                        return []
+                print("📭 No sessions found in Firebase")
                 return []
         except Exception as e:
-            print(f"❌ Firebase Load Error: {e}")
+            print(f"❌ Firebase load error: {e}")
             # Fallback to local file
             if os.path.exists(file):
                 try:
@@ -156,13 +93,40 @@ def load_data(file):
                     return []
             return []
     else:
+        # Local file से load करो
         if os.path.exists(file):
             try:
                 with open(file, 'r') as f:
                     return json.load(f)
             except:
                 return []
-        return []
+    return []
+
+def save_data(file, data):
+    if file == DB_FILE and FIREBASE_ACTIVE:
+        # Firebase में save करो
+        try:
+            ref = db.reference('/sessions')
+            ref.set(data)
+            print(f"✅ Saved {len(data)} sessions to Firebase")
+            return True
+        except Exception as e:
+            print(f"❌ Firebase save error: {e}")
+            # Fallback to local file
+            try:
+                with open(file, 'w') as f:
+                    json.dump(data, f, indent=4)
+                return True
+            except:
+                return False
+    else:
+        # Local file में save करो
+        try:
+            with open(file, 'w') as f:
+                json.dump(data, f, indent=4)
+            return True
+        except:
+            return False
 
 def get_admins():
     admins = load_data(ADMIN_FILE)
@@ -208,8 +172,53 @@ async def join_group(client, link):
         return True
     except UserAlreadyParticipantError:
         return True
+    except:
+        return False
+
+# ===== FIXED LEAVE GROUP FUNCTION =====
+async def leave_group(client, link):
+    """Group/channel se leave karne ke liye - FIXED VERSION"""
+    link = link.strip()
+    
+    # Clean the link properly
+    original_link = link
+    link = link.replace("https://t.me/", "").replace("t.me/", "").replace("@", "").replace("+", "")
+    
+    try:
+        # Try to get the entity
+        try:
+            # First try with the cleaned link
+            entity = await client.get_entity(link)
+        except:
+            # If that fails, try with the original username format
+            if "/" in original_link:
+                parts = original_link.split('/')
+                username = parts[-1].split('?')[0]
+                try:
+                    entity = await client.get_entity(f"@{username}")
+                except:
+                    entity = await client.get_entity(username)
+            else:
+                raise
+        
+        # Leave the channel/group
+        await client(LeaveChannelRequest(entity))
+        return True
+        
+    except FloodWaitError as e:
+        # Handle flood wait
+        logger.warning(f"Flood wait: {e.seconds} seconds")
+        await asyncio.sleep(e.seconds)
+        try:
+            await client(LeaveChannelRequest(entity))
+            return True
+        except:
+            return False
+    except UserAlreadyParticipantError:
+        # Already left? This is actually good
+        return True
     except Exception as e:
-        logger.error(f"Join error: {e}")
+        logger.error(f"Leave error: {e}")
         return False
 
 @bot.on(events.NewMessage(pattern='/start'))
@@ -316,8 +325,6 @@ async def callback(event):
                 
                 if not exists:
                     db.append({"phone": phone, "string": session_str})
-                else:
-                    print(f"✅ Updated existing session for {phone}")
                 
                 save_data(DB_FILE, db)
                 
@@ -337,29 +344,85 @@ async def callback(event):
                 await status.delete()
         await start(event)
 
-    # ===== LEAVE ALL - COMPLETELY FIXED VERSION =====
+    # ===== FIXED LEAVE ALL =====
     elif data == "leave_all":
         if not db:
             await event.answer("❌ No IDs!", alert=True)
             return
         
         async with bot.conversation(event.chat_id, timeout=300) as conv:
-            await conv.send_message("🔗 **Enter Group/Channel Link to leave from:**")
+            await conv.send_message(
+                "🔗 **Enter Group/Channel Link to leave from:**\n"
+                "Example: @username or https://t.me/username",
+                buttons=back_button()
+            )
             link = (await conv.get_response()).text
+            if link.lower() == "back":
+                await start(event)
+                return
             
-            # Clean the link properly
-            clean_link = link.replace("https://t.me/", "").replace("t.me/", "").replace("@", "")
-            if "/" in clean_link:
-                clean_link = clean_link.split('/')[0]
+            # First check if we can access the group
+            try:
+                test_client = TelegramClient(StringSession(db[0]['string']), API_ID, API_HASH)
+                await test_client.connect()
+                
+                # Try to join first (to make sure we have access)
+                join_success = await join_group(test_client, link)
+                if not join_success:
+                    await test_client.disconnect()
+                    await conv.send_message("❌ **Cannot access this group/channel!**")
+                    await start(event)
+                    return
+                
+                await test_client.disconnect()
+            except Exception as e:
+                await conv.send_message(f"❌ **Error accessing group:** {str(e)}")
+                await start(event)
+                return
             
-            await conv.send_message(f"🔢 **How many IDs to leave? (Max {len(db)}):**")
-            qty = int((await conv.get_response()).text)
-            qty = min(qty, len(db))
+            await conv.send_message(f"🔢 **How many accounts to leave? (Max {len(db)}):**")
+            try:
+                qty_text = (await conv.get_response()).text
+                if qty_text.lower() == "back":
+                    await start(event)
+                    return
+                qty = int(qty_text)
+                qty = min(qty, len(db))
+            except ValueError:
+                await conv.send_message("❌ **Invalid number!**")
+                await start(event)
+                return
             
-            await conv.send_message("⏱️ **Delay between leaves (sec):**")
-            delay = int((await conv.get_response()).text)
+            await conv.send_message("⏱️ **Delay between leaves (seconds):**")
+            try:
+                delay_text = (await conv.get_response()).text
+                if delay_text.lower() == "back":
+                    await start(event)
+                    return
+                delay = int(delay_text)
+            except ValueError:
+                await conv.send_message("❌ **Invalid delay!**")
+                await start(event)
+                return
             
-            msg = await conv.send_message(f"🚪 Leaving 0/{qty}...")
+            # Confirmation
+            await conv.send_message(
+                f"⚠️ **Confirm Leave Operation**\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📍 Link: {link}\n"
+                f"📊 Accounts: {qty}\n"
+                f"⏱️ Delay: {delay}s\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Type **yes** to confirm:"
+            )
+            
+            confirm = (await conv.get_response()).text
+            if confirm.lower() != "yes":
+                await conv.send_message("❌ **Cancelled!**")
+                await start(event)
+                return
+            
+            msg = await conv.send_message(f"🚪 **Leaving 0/{qty}...**")
             done = 0
             failed = 0
             
@@ -369,38 +432,45 @@ async def callback(event):
                     client = TelegramClient(StringSession(acc['string']), API_ID, API_HASH)
                     await client.connect()
                     
-                    # Check if client is authorized
+                    # Check if authorized
                     if not await client.is_user_authorized():
                         failed += 1
+                        await msg.edit(f"Progress: {i}/{qty} | ✅ Left: {done} | ❌ Failed: {failed} (Unauthorized)")
                         continue
                     
-                    # Try to get entity and leave
-                    try:
-                        entity = await client.get_entity(clean_link)
-                        await client(LeaveChannelRequest(entity))
+                    # Start ghost online for this account
+                    asyncio.create_task(start_ghost_online(client, acc['phone']))
+                    
+                    # Leave the group
+                    if await leave_group(client, link):
                         done += 1
-                        logger.info(f"✅ Left: {acc['phone']}")
-                    except Exception as e:
-                        logger.error(f"Leave error for {acc['phone']}: {e}")
+                    else:
                         failed += 1
                     
                     await msg.edit(f"Progress: {i}/{qty} | ✅ Left: {done} | ❌ Failed: {failed}")
                     
+                    # Wait before next leave
                     if i < qty:
                         await asyncio.sleep(delay)
                         
                 except Exception as e:
-                    logger.error(f"Connection error for {acc['phone']}: {e}")
+                    logger.error(f"Leave error for {acc['phone']}: {e}")
                     failed += 1
                 finally:
                     if client:
                         await client.disconnect()
+                
+                # Small break every 10 accounts to avoid flood
+                if i % 10 == 0 and i < qty:
+                    await asyncio.sleep(5)
             
+            # Final message
             await msg.edit(
-                f"✅ **Leave Complete!**\n"
+                f"✅ **Leave Operation Complete!**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📍 Link: {link}\n"
                 f"📊 Total: {qty}\n"
-                f"✅ Left: {done}\n"
+                f"✅ Success: {done}\n"
                 f"❌ Failed: {failed}\n"
                 f"━━━━━━━━━━━━━━━━━━━━",
                 buttons=back_button()
@@ -500,8 +570,6 @@ async def callback(event):
                 except Exception as e:
                     logger.error(f"Join error: {e}")
                     failed += 1
-                finally:
-                    await client.disconnect()
             
             await msg.edit(f"✅ Complete! Joined: {done}/{qty} | Failed: {failed}", buttons=back_button())
         await start(event)
@@ -571,8 +639,6 @@ async def callback(event):
                         
                 except Exception as e:
                     logger.error(f"VC error: {e}")
-                finally:
-                    await client.disconnect()
             
             await msg.edit(f"✅ VC Complete! Joined: {done}/{qty}", buttons=back_button())
         await start(event)
@@ -642,8 +708,6 @@ async def callback(event):
                     
                 except Exception as e:
                     logger.error(f"Cleanup error: {e}")
-                finally:
-                    await client.disconnect()
             
             await msg.edit(f"✅ Cleanup Complete! Removed: {total}", buttons=back_button())
         await start(event)
@@ -764,13 +828,11 @@ async def ping(event):
 
 async def main():
     print("\n" + "="*60)
-    print("⚡ TITAN V50 - FINAL VERSION (LEAVE ALL FIXED)")
+    print("⚡ TITAN V50 - FIREBASE INTEGRATED")
     print("="*60)
     print(f"👑 Owner: @{OWNER_TAG}")
     print(f"👥 Total Admins: {len(get_admins())}")
     print(f"🔥 Firebase: {'✅ ACTIVE' if FIREBASE_ACTIVE else '❌ NOT CONNECTED'}")
-    print("✅ Leave All: COMPLETELY FIXED")
-    print("✅ Merge Logic: ACTIVE (No Duplicates)")
     print("✅ IDs will NEVER be lost!")
     print("="*60)
     await bot.start(bot_token=BOT_TOKEN)
