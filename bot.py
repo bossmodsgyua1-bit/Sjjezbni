@@ -31,25 +31,30 @@ from telethon.errors import (
 )
 
 # ===== FIREBASE IMPORTS =====
-import firebase_admin
-from firebase_admin import credentials, db
+try:
+    import firebase_admin
+    from firebase_admin import credentials, db
+    FIREBASE_AVAILABLE = True
+except:
+    FIREBASE_AVAILABLE = False
+    print("⚠️ firebase-admin not installed. Using local storage only.")
 
 # ===== FIREBASE INITIALIZATION =====
 FIREBASE_ACTIVE = False
-try:
-    # Check if firebase config file exists
-    if os.path.exists("firebase-config.json"):
-        cred = credentials.Certificate("firebase-config.json")
-        firebase_admin.initialize_app(cred, {
-            'databaseURL': 'https://bossmodpro-default-rtdb.firebaseio.com/'
-        })
-        print("✅ Firebase Connected Successfully!")
-        FIREBASE_ACTIVE = True
-    else:
-        print("⚠️ firebase-config.json not found. Using local storage only.")
-except Exception as e:
-    print(f"⚠️ Firebase Connection Error: {e}")
-    print("⚠️ Using local file storage only!")
+if FIREBASE_AVAILABLE:
+    try:
+        if os.path.exists("firebase-config.json"):
+            cred = credentials.Certificate("firebase-config.json")
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': 'https://bossmodpro-default-rtdb.firebaseio.com/'
+            })
+            print("✅ Firebase Connected Successfully!")
+            FIREBASE_ACTIVE = True
+        else:
+            print("⚠️ firebase-config.json not found. Using local storage only.")
+    except Exception as e:
+        print(f"⚠️ Firebase Connection Error: {e}")
+        print("⚠️ Using local file storage only!")
 
 # ===== CONFIGURATION =====
 API_ID = 36750842
@@ -69,7 +74,7 @@ START_TIME = datetime.now()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TITAN")
 
-# ===== FIREBASE DATABASE FUNCTIONS =====
+# ===== DATABASE FUNCTIONS =====
 def load_data(file):
     if file == DB_FILE and FIREBASE_ACTIVE:
         # Firebase से sessions load करो
@@ -172,22 +177,8 @@ async def join_group(client, link):
         return True
     except UserAlreadyParticipantError:
         return True
-    except:
-        return False
-
-async def leave_group(client, link):
-    """Group/channel se leave karne ke liye"""
-    link = link.replace("https://t.me/", "").replace("t.me/", "").replace("@", "")
-    try:
-        if "+" in link or "joinchat" in link:
-            hash_part = link.split('/')[-1].replace('+', '')
-            entity = await client.get_entity(hash_part)
-        else:
-            entity = await client.get_entity(link)
-        
-        await client(LeaveChannelRequest(entity))
-        return True
-    except:
+    except Exception as e:
+        logger.error(f"Join error: {e}")
         return False
 
 @bot.on(events.NewMessage(pattern='/start'))
@@ -313,7 +304,7 @@ async def callback(event):
                 await status.delete()
         await start(event)
 
-    # ===== LEAVE ALL =====
+    # ===== LEAVE ALL - FIXED VERSION =====
     elif data == "leave_all":
         if not db:
             await event.answer("❌ No IDs!", alert=True)
@@ -322,6 +313,9 @@ async def callback(event):
         async with bot.conversation(event.chat_id, timeout=300) as conv:
             await conv.send_message("🔗 **Enter Group/Channel Link to leave from:**")
             link = (await conv.get_response()).text
+            
+            # Clean the link
+            clean_link = link.replace("https://t.me/", "").replace("t.me/", "").replace("@", "")
             
             await conv.send_message(f"🔢 **How many IDs to leave? (Max {len(db)}):**")
             qty = int((await conv.get_response()).text)
@@ -335,13 +329,26 @@ async def callback(event):
             failed = 0
             
             for i, acc in enumerate(db[:qty], 1):
-                client = TelegramClient(StringSession(acc['string']), API_ID, API_HASH)
+                client = None
                 try:
+                    client = TelegramClient(StringSession(acc['string']), API_ID, API_HASH)
                     await client.connect()
                     
-                    if await leave_group(client, link):
+                    # Get entity properly
+                    try:
+                        if "+" in clean_link or "joinchat" in clean_link:
+                            hash_part = clean_link.split('/')[-1].replace('+', '')
+                            entity = await client.get_entity(hash_part)
+                        else:
+                            entity = await client.get_entity(clean_link)
+                        
+                        # Leave the channel/group
+                        await client(LeaveChannelRequest(entity))
                         done += 1
-                    else:
+                        logger.info(f"✅ Left: {acc['phone']}")
+                        
+                    except Exception as e:
+                        logger.error(f"Leave error for {acc['phone']}: {e}")
                         failed += 1
                     
                     await msg.edit(f"Progress: {i}/{qty} | ✅ Left: {done} | ❌ Failed: {failed}")
@@ -350,10 +357,11 @@ async def callback(event):
                         await asyncio.sleep(delay)
                         
                 except Exception as e:
-                    logger.error(f"Leave error: {e}")
+                    logger.error(f"Connection error for {acc['phone']}: {e}")
                     failed += 1
                 finally:
-                    await client.disconnect()
+                    if client:
+                        await client.disconnect()
             
             await msg.edit(
                 f"✅ **Leave Complete!**\n"
@@ -459,6 +467,8 @@ async def callback(event):
                 except Exception as e:
                     logger.error(f"Join error: {e}")
                     failed += 1
+                finally:
+                    await client.disconnect()
             
             await msg.edit(f"✅ Complete! Joined: {done}/{qty} | Failed: {failed}", buttons=back_button())
         await start(event)
@@ -528,6 +538,8 @@ async def callback(event):
                         
                 except Exception as e:
                     logger.error(f"VC error: {e}")
+                finally:
+                    await client.disconnect()
             
             await msg.edit(f"✅ VC Complete! Joined: {done}/{qty}", buttons=back_button())
         await start(event)
@@ -597,6 +609,8 @@ async def callback(event):
                     
                 except Exception as e:
                     logger.error(f"Cleanup error: {e}")
+                finally:
+                    await client.disconnect()
             
             await msg.edit(f"✅ Cleanup Complete! Removed: {total}", buttons=back_button())
         await start(event)
@@ -717,11 +731,12 @@ async def ping(event):
 
 async def main():
     print("\n" + "="*60)
-    print("⚡ TITAN V50 - FIREBASE INTEGRATED")
+    print("⚡ TITAN V50 - COMPLETE FINAL VERSION")
     print("="*60)
     print(f"👑 Owner: @{OWNER_TAG}")
     print(f"👥 Total Admins: {len(get_admins())}")
     print(f"🔥 Firebase: {'✅ ACTIVE' if FIREBASE_ACTIVE else '❌ NOT CONNECTED'}")
+    print("✅ Leave All: FIXED")
     print("✅ IDs will NEVER be lost!")
     print("="*60)
     await bot.start(bot_token=BOT_TOKEN)
