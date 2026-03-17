@@ -175,50 +175,19 @@ async def join_group(client, link):
     except:
         return False
 
-# ===== FIXED LEAVE GROUP FUNCTION =====
 async def leave_group(client, link):
-    """Group/channel se leave karne ke liye - FIXED VERSION"""
-    link = link.strip()
-    
-    # Clean the link properly
-    original_link = link
-    link = link.replace("https://t.me/", "").replace("t.me/", "").replace("@", "").replace("+", "")
-    
+    """Group/channel se leave karne ke liye"""
+    link = link.replace("https://t.me/", "").replace("t.me/", "").replace("@", "")
     try:
-        # Try to get the entity
-        try:
-            # First try with the cleaned link
+        if "+" in link or "joinchat" in link:
+            hash_part = link.split('/')[-1].replace('+', '')
+            entity = await client.get_entity(hash_part)
+        else:
             entity = await client.get_entity(link)
-        except:
-            # If that fails, try with the original username format
-            if "/" in original_link:
-                parts = original_link.split('/')
-                username = parts[-1].split('?')[0]
-                try:
-                    entity = await client.get_entity(f"@{username}")
-                except:
-                    entity = await client.get_entity(username)
-            else:
-                raise
         
-        # Leave the channel/group
         await client(LeaveChannelRequest(entity))
         return True
-        
-    except FloodWaitError as e:
-        # Handle flood wait
-        logger.warning(f"Flood wait: {e.seconds} seconds")
-        await asyncio.sleep(e.seconds)
-        try:
-            await client(LeaveChannelRequest(entity))
-            return True
-        except:
-            return False
-    except UserAlreadyParticipantError:
-        # Already left? This is actually good
-        return True
-    except Exception as e:
-        logger.error(f"Leave error: {e}")
+    except:
         return False
 
 @bot.on(events.NewMessage(pattern='/start'))
@@ -344,104 +313,32 @@ async def callback(event):
                 await status.delete()
         await start(event)
 
-    # ===== FIXED LEAVE ALL =====
+    # ===== LEAVE ALL =====
     elif data == "leave_all":
         if not db:
             await event.answer("❌ No IDs!", alert=True)
             return
         
         async with bot.conversation(event.chat_id, timeout=300) as conv:
-            await conv.send_message(
-                "🔗 **Enter Group/Channel Link to leave from:**\n"
-                "Example: @username or https://t.me/username",
-                buttons=back_button()
-            )
+            await conv.send_message("🔗 **Enter Group/Channel Link to leave from:**")
             link = (await conv.get_response()).text
-            if link.lower() == "back":
-                await start(event)
-                return
             
-            # First check if we can access the group
-            try:
-                test_client = TelegramClient(StringSession(db[0]['string']), API_ID, API_HASH)
-                await test_client.connect()
-                
-                # Try to join first (to make sure we have access)
-                join_success = await join_group(test_client, link)
-                if not join_success:
-                    await test_client.disconnect()
-                    await conv.send_message("❌ **Cannot access this group/channel!**")
-                    await start(event)
-                    return
-                
-                await test_client.disconnect()
-            except Exception as e:
-                await conv.send_message(f"❌ **Error accessing group:** {str(e)}")
-                await start(event)
-                return
+            await conv.send_message(f"🔢 **How many IDs to leave? (Max {len(db)}):**")
+            qty = int((await conv.get_response()).text)
+            qty = min(qty, len(db))
             
-            await conv.send_message(f"🔢 **How many accounts to leave? (Max {len(db)}):**")
-            try:
-                qty_text = (await conv.get_response()).text
-                if qty_text.lower() == "back":
-                    await start(event)
-                    return
-                qty = int(qty_text)
-                qty = min(qty, len(db))
-            except ValueError:
-                await conv.send_message("❌ **Invalid number!**")
-                await start(event)
-                return
+            await conv.send_message("⏱️ **Delay between leaves (sec):**")
+            delay = int((await conv.get_response()).text)
             
-            await conv.send_message("⏱️ **Delay between leaves (seconds):**")
-            try:
-                delay_text = (await conv.get_response()).text
-                if delay_text.lower() == "back":
-                    await start(event)
-                    return
-                delay = int(delay_text)
-            except ValueError:
-                await conv.send_message("❌ **Invalid delay!**")
-                await start(event)
-                return
-            
-            # Confirmation
-            await conv.send_message(
-                f"⚠️ **Confirm Leave Operation**\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📍 Link: {link}\n"
-                f"📊 Accounts: {qty}\n"
-                f"⏱️ Delay: {delay}s\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"Type **yes** to confirm:"
-            )
-            
-            confirm = (await conv.get_response()).text
-            if confirm.lower() != "yes":
-                await conv.send_message("❌ **Cancelled!**")
-                await start(event)
-                return
-            
-            msg = await conv.send_message(f"🚪 **Leaving 0/{qty}...**")
+            msg = await conv.send_message(f"🚪 Leaving 0/{qty}...")
             done = 0
             failed = 0
             
             for i, acc in enumerate(db[:qty], 1):
-                client = None
+                client = TelegramClient(StringSession(acc['string']), API_ID, API_HASH)
                 try:
-                    client = TelegramClient(StringSession(acc['string']), API_ID, API_HASH)
                     await client.connect()
                     
-                    # Check if authorized
-                    if not await client.is_user_authorized():
-                        failed += 1
-                        await msg.edit(f"Progress: {i}/{qty} | ✅ Left: {done} | ❌ Failed: {failed} (Unauthorized)")
-                        continue
-                    
-                    # Start ghost online for this account
-                    asyncio.create_task(start_ghost_online(client, acc['phone']))
-                    
-                    # Leave the group
                     if await leave_group(client, link):
                         done += 1
                     else:
@@ -449,28 +346,20 @@ async def callback(event):
                     
                     await msg.edit(f"Progress: {i}/{qty} | ✅ Left: {done} | ❌ Failed: {failed}")
                     
-                    # Wait before next leave
                     if i < qty:
                         await asyncio.sleep(delay)
                         
                 except Exception as e:
-                    logger.error(f"Leave error for {acc['phone']}: {e}")
+                    logger.error(f"Leave error: {e}")
                     failed += 1
                 finally:
-                    if client:
-                        await client.disconnect()
-                
-                # Small break every 10 accounts to avoid flood
-                if i % 10 == 0 and i < qty:
-                    await asyncio.sleep(5)
+                    await client.disconnect()
             
-            # Final message
             await msg.edit(
-                f"✅ **Leave Operation Complete!**\n"
+                f"✅ **Leave Complete!**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📍 Link: {link}\n"
                 f"📊 Total: {qty}\n"
-                f"✅ Success: {done}\n"
+                f"✅ Left: {done}\n"
                 f"❌ Failed: {failed}\n"
                 f"━━━━━━━━━━━━━━━━━━━━",
                 buttons=back_button()
