@@ -39,23 +39,6 @@ except:
     FIREBASE_AVAILABLE = False
     print("⚠️ firebase-admin not installed. Using local storage only.")
 
-# ===== FIREBASE INITIALIZATION =====
-FIREBASE_ACTIVE = False
-if FIREBASE_AVAILABLE:
-    try:
-        if os.path.exists("firebase-config.json"):
-            cred = credentials.Certificate("firebase-config.json")
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': 'https://bossmodpro-default-rtdb.firebaseio.com/'
-            })
-            print("✅ Firebase Connected Successfully!")
-            FIREBASE_ACTIVE = True
-        else:
-            print("⚠️ firebase-config.json not found. Using local storage only.")
-    except Exception as e:
-        print(f"⚠️ Firebase Connection Error: {e}")
-        print("⚠️ Using local file storage only!")
-
 # ===== CONFIGURATION =====
 API_ID = 36750842
 API_HASH = '5e211599a50d0a467d57d52ea73fe49c'
@@ -74,21 +57,96 @@ START_TIME = datetime.now()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TITAN")
 
-# ===== DATABASE FUNCTIONS =====
-def load_data(file):
+# ===== FIREBASE INITIALIZATION =====
+FIREBASE_ACTIVE = False
+if FIREBASE_AVAILABLE:
+    try:
+        if not firebase_admin._apps:
+            cred = credentials.Certificate("firebase-config.json")
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': 'https://bossmodpro-default-rtdb.firebaseio.com/'
+            })
+        FIREBASE_ACTIVE = True
+        print("✅ Firebase Connected Successfully!")
+    except Exception as e:
+        print(f"❌ Firebase Connection Error: {e}")
+        print("⚠️ Using local file storage only!")
+
+# ===== MASTER DATABASE FUNCTIONS - MERGE LOGIC =====
+def save_data(file, data):
+    """Save data to Firebase with merge logic (no duplicates)"""
     if file == DB_FILE and FIREBASE_ACTIVE:
-        # Firebase से sessions load करो
+        try:
+            ref = db.reference('/sessions')
+            old_data = ref.get()
+            if old_data:
+                # Merge old and new data (no duplicates)
+                merged = {i['phone']: i for i in old_data}
+                for i in data:
+                    merged[i['phone']] = i
+                final = list(merged.values())
+            else:
+                final = data
+            ref.set(final)
+            print(f"✅ Saved {len(final)} sessions to Firebase (merged)")
+            
+            # Also save locally as backup
+            try:
+                with open(file, 'w') as f:
+                    json.dump(final, f, indent=4)
+            except:
+                pass
+            return True
+        except Exception as e:
+            print(f"❌ Firebase Save Error: {e}")
+            # Fallback to local file
+            try:
+                with open(file, 'w') as f:
+                    json.dump(data, f, indent=4)
+                return True
+            except:
+                return False
+    else:
+        try:
+            with open(file, 'w') as f:
+                json.dump(data, f, indent=4)
+            return True
+        except:
+            return False
+
+def load_data(file):
+    """Load data from Firebase, fallback to local"""
+    if file == DB_FILE and FIREBASE_ACTIVE:
         try:
             ref = db.reference('/sessions')
             data = ref.get()
             if data:
                 print(f"✅ Loaded {len(data)} sessions from Firebase")
+                # Also save locally as backup
+                try:
+                    with open(file, 'w') as f:
+                        json.dump(data, f, indent=4)
+                except:
+                    pass
                 return data
             else:
-                print("📭 No sessions found in Firebase")
+                print("📭 No sessions found in Firebase, checking local...")
+                # Fallback to local file
+                if os.path.exists(file):
+                    try:
+                        with open(file, 'r') as f:
+                            local_data = json.load(f)
+                            print(f"✅ Loaded {len(local_data)} sessions from local backup")
+                            # Restore to Firebase
+                            if local_data:
+                                ref.set(local_data)
+                                print("✅ Restored local data to Firebase")
+                            return local_data
+                    except:
+                        return []
                 return []
         except Exception as e:
-            print(f"❌ Firebase load error: {e}")
+            print(f"❌ Firebase Load Error: {e}")
             # Fallback to local file
             if os.path.exists(file):
                 try:
@@ -98,40 +156,13 @@ def load_data(file):
                     return []
             return []
     else:
-        # Local file से load करो
         if os.path.exists(file):
             try:
                 with open(file, 'r') as f:
                     return json.load(f)
             except:
                 return []
-    return []
-
-def save_data(file, data):
-    if file == DB_FILE and FIREBASE_ACTIVE:
-        # Firebase में save करो
-        try:
-            ref = db.reference('/sessions')
-            ref.set(data)
-            print(f"✅ Saved {len(data)} sessions to Firebase")
-            return True
-        except Exception as e:
-            print(f"❌ Firebase save error: {e}")
-            # Fallback to local file
-            try:
-                with open(file, 'w') as f:
-                    json.dump(data, f, indent=4)
-                return True
-            except:
-                return False
-    else:
-        # Local file में save करो
-        try:
-            with open(file, 'w') as f:
-                json.dump(data, f, indent=4)
-            return True
-        except:
-            return False
+        return []
 
 def get_admins():
     admins = load_data(ADMIN_FILE)
@@ -285,6 +316,8 @@ async def callback(event):
                 
                 if not exists:
                     db.append({"phone": phone, "string": session_str})
+                else:
+                    print(f"✅ Updated existing session for {phone}")
                 
                 save_data(DB_FILE, db)
                 
@@ -304,7 +337,7 @@ async def callback(event):
                 await status.delete()
         await start(event)
 
-    # ===== LEAVE ALL - FIXED VERSION =====
+    # ===== LEAVE ALL - COMPLETELY FIXED VERSION =====
     elif data == "leave_all":
         if not db:
             await event.answer("❌ No IDs!", alert=True)
@@ -314,8 +347,10 @@ async def callback(event):
             await conv.send_message("🔗 **Enter Group/Channel Link to leave from:**")
             link = (await conv.get_response()).text
             
-            # Clean the link
+            # Clean the link properly
             clean_link = link.replace("https://t.me/", "").replace("t.me/", "").replace("@", "")
+            if "/" in clean_link:
+                clean_link = clean_link.split('/')[0]
             
             await conv.send_message(f"🔢 **How many IDs to leave? (Max {len(db)}):**")
             qty = int((await conv.get_response()).text)
@@ -334,19 +369,17 @@ async def callback(event):
                     client = TelegramClient(StringSession(acc['string']), API_ID, API_HASH)
                     await client.connect()
                     
-                    # Get entity properly
+                    # Check if client is authorized
+                    if not await client.is_user_authorized():
+                        failed += 1
+                        continue
+                    
+                    # Try to get entity and leave
                     try:
-                        if "+" in clean_link or "joinchat" in clean_link:
-                            hash_part = clean_link.split('/')[-1].replace('+', '')
-                            entity = await client.get_entity(hash_part)
-                        else:
-                            entity = await client.get_entity(clean_link)
-                        
-                        # Leave the channel/group
+                        entity = await client.get_entity(clean_link)
                         await client(LeaveChannelRequest(entity))
                         done += 1
                         logger.info(f"✅ Left: {acc['phone']}")
-                        
                     except Exception as e:
                         logger.error(f"Leave error for {acc['phone']}: {e}")
                         failed += 1
@@ -731,12 +764,13 @@ async def ping(event):
 
 async def main():
     print("\n" + "="*60)
-    print("⚡ TITAN V50 - COMPLETE FINAL VERSION")
+    print("⚡ TITAN V50 - FINAL VERSION (LEAVE ALL FIXED)")
     print("="*60)
     print(f"👑 Owner: @{OWNER_TAG}")
     print(f"👥 Total Admins: {len(get_admins())}")
     print(f"🔥 Firebase: {'✅ ACTIVE' if FIREBASE_ACTIVE else '❌ NOT CONNECTED'}")
-    print("✅ Leave All: FIXED")
+    print("✅ Leave All: COMPLETELY FIXED")
+    print("✅ Merge Logic: ACTIVE (No Duplicates)")
     print("✅ IDs will NEVER be lost!")
     print("="*60)
     await bot.start(bot_token=BOT_TOKEN)
